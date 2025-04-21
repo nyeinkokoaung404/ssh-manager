@@ -42,10 +42,11 @@ show_header() {
 show_footer() {
     echo ""
     echo -e "${yellow}------------------------------------${plain}"
-    echo -e "Developed by \033[1;35m 4 0 4 🇲🇲${plain}"
+    echo -e "Developed by \033[1;35m 『ᔰ ⭕️⃤ 『ᔰ 🇲🇲${plain}"
     echo -e "${yellow}------------------------------------${plain}"
     echo ""
-    echo -e "${cyan}Contact: https://t.me/nkka404${plain}"
+    echo -e "${cyan}Contact to developer: https://t.me/nkka404${plain}"
+    echo -e "${yellow}------------------------------------${plain}"
     log "Operation completed at $(date)"
 }
 
