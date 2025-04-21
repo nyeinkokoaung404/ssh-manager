@@ -17,6 +17,7 @@ BACKUP_DIR="/root/ssh_backups"
 BANNER_FILE="/etc/ssh/channel_404"
 SSH_CONFIG="/etc/ssh/sshd_config"
 UDP_CONFIG="/etc/ssh/sshd_udp"
+UDP_SERVICE="/etc/systemd/system/udp-ssh.service"
 DNSTT_DIR="/etc/dnstt"
 DNSTT_SERVICE="/etc/systemd/system/dnstt-server.service"
 LOG_FILE="/var/log/ssh_manager.log"
@@ -247,41 +248,52 @@ configure_udp() {
             log "Enabling UDP ports: $ports"
             
             # Install UDP relay if needed
-            if ! command -v udp2raw &> /dev/null; then
-                echo -e "${yellow}➤ Installing UDP relay...${plain}"
-                wget -O /usr/bin/udp2raw https://github.com/nyeinkokoaung404/ssh-manager/raw/main/udp2raw
-                chmod +x /usr/bin/udp2raw
-            fi
+            #if ! command -v udp2raw &> /dev/null; then
+                #echo -e "${yellow}➤ Installing UDP relay...${plain}"
+                #wget -O /usr/bin/udp2raw https://github.com/nyeinkokoaung404/ssh-manager/raw/main/udp2raw
+               # chmod +x /usr/bin/udp2raw
+           # fi
+            
+            # Install dependencies
+            apt-get update
+            apt-get install -y iptables
             
             # Create UDP config
             echo "PORTS=$ports" > "$UDP_CONFIG"
             echo "ENABLED=yes" >> "$UDP_CONFIG"
             
-            # Create systemd service
-            cat > /etc/systemd/system/udp-ssh.service <<EOF
+            # Create systemd service to persist iptables rules
+            cat > "$UDP_SERVICE" <<EOF
 [Unit]
-Description=UDP SSH Relay
+Description=UDP SSH Redirect
 After=network.target
 
 [Service]
-User=root
-ExecStart=/usr/bin/udp2raw -s -l0.0.0.0:53 -r 127.0.0.1:22 --raw-mode faketcp -a -k "your-secret-key"
-Restart=always
-RestartSec=3
+Type=oneshot
+ExecStart=/sbin/iptables-restore < /etc/iptables.rules
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
+            # Save iptables rules
+            iptables-save > /etc/iptables.rules
             
             systemctl daemon-reload
             systemctl enable --now udp-ssh
             
             echo -e "${green}✔ UDP SSH enabled on ports $ports${plain}"
+            echo -e "${yellow}ℹ Note: You may need to open UDP ports in your firewall${plain}"
             log "UDP enabled on ports $ports"
             ;;
             
         disable)
             echo -e "${udp_color}➤ Disabling UDP SSH...${plain}"
+            
+            # Remove iptables rules
+            iptables -t nat -D PREROUTING -p udp --dport 1:65535 -j REDIRECT --to-ports 22 2>/dev/null
+            iptables-save > /etc/iptables.rules
+    
             log "Disabling UDP"
             
             systemctl stop udp-ssh
