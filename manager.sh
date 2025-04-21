@@ -5,7 +5,7 @@
 # =============================================
 # Features:
 # - User management (create/delete/list)
-# - UDP SSH configuration
+# - UDP SSH configuration (fixed port range support)
 # - DNSTT server setup
 # - Backup/restore functionality
 # - Bandwidth limiting
@@ -35,7 +35,7 @@ DNSTT_SERVICE="/etc/systemd/system/dnstt-server.service"
 LOG_FILE="/var/log/ssh_manager.log"
 IPTABLES_RULES="/etc/iptables.rules"
 FIREWALLD_ENABLED=$(systemctl is-enabled firewalld 2>/dev/null)
-VERSION="1.2.1"
+VERSION="1.2.2"
 
 # Initialize logging
 init_logging() {
@@ -113,9 +113,9 @@ validate_input() {
             fi
             ;;
         port)
-            if ! [[ "$value" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+            if ! [[ "$value" =~ ^[0-9]+(:[0-9]+)?$ ]]; then
                 log "Invalid port range: $value" "ERROR"
-                echo -e "${red}Error:${plain} Invalid port format. Use single port or range (e.g., 1000-2000)"
+                echo -e "${red}Error:${plain} Invalid port format. Use single port or range (e.g., 10000:20000)"
                 return 1
             fi
             ;;
@@ -199,7 +199,7 @@ create_user() {
     # Protocol-specific info
     case "$protocol" in
         udp|both)
-            echo -e "${udp_color}▣ UDP Ports: 1-65535${plain}"
+            echo -e "${udp_color}▣ UDP Ports: 1:65535${plain}"
             ;;
         dnstt)
             if [ -f "$DNSTT_DIR/config" ]; then
@@ -214,11 +214,11 @@ create_user() {
     return 0
 }
 
-# Enhanced UDP configuration with firewall support
+# Fixed UDP configuration that works with port ranges
 configure_udp() {
     local start_time=$(date +%s)
     local action="$1"
-    local ports="${2:-1-65535}"
+    local ports="${2:-1:65535}"  # Using colon as separator
     
     show_header
     validate_input port "$ports" || return 1
@@ -226,7 +226,7 @@ configure_udp() {
     case "$action" in
         enable)
             log "Enabling UDP SSH on ports $ports"
-            echo -e "${udp_color}➤ Enabling UDP SSH on ports $ports...${plain}"
+            echo -e "${udp_color}➤ Enabling UDP SSH...${plain}"
             
             # Install dependencies
             echo -e "${blue}▣ Installing required packages...${plain}"
@@ -237,18 +237,36 @@ configure_udp() {
             
             # Configure iptables
             echo -e "${blue}▣ Configuring network rules...${plain}"
-            if ! iptables -t nat -A PREROUTING -p udp --dport "$ports" -j REDIRECT --to-ports 22; then
-                log "Failed to add iptables rule" "ERROR"
-                return 1
+            
+            # Check if we're using nftables backend
+            local iptables_backend=$(iptables --version | grep -o nf_tables)
+            
+            if [ "$iptables_backend" = "nf_tables" ]; then
+                # NFTables version - handle port ranges differently
+                if [[ "$ports" == *":"* ]]; then
+                    local start_port=${ports%:*}
+                    local end_port=${ports#*:}
+                    for (( port=start_port; port<=end_port; port++ )); do
+                        iptables -t nat -A PREROUTING -p udp --dport "$port" -j REDIRECT --to-ports 22
+                    done
+                else
+                    # Single port
+                    iptables -t nat -A PREROUTING -p udp --dport "$ports" -j REDIRECT --to-ports 22
+                fi
+            else
+                # Legacy iptables version
+                iptables -t nat -A PREROUTING -p udp --dport "$ports" -j REDIRECT --to-ports 22
             fi
             
             # Handle firewalld if enabled
             if [ "$FIREWALLD_ENABLED" = "enabled" ]; then
                 echo -e "${blue}▣ Configuring firewalld...${plain}"
-                if ! firewall-cmd --add-port="$ports/udp" --permanent || ! firewall-cmd --reload; then
-                    log "Failed to configure firewalld for UDP" "ERROR"
-                    return 1
+                if [[ "$ports" == *":"* ]]; then
+                    firewall-cmd --add-port="${ports/:/-}/udp" --permanent
+                else
+                    firewall-cmd --add-port="$ports/udp" --permanent
                 fi
+                firewall-cmd --reload
             fi
             
             # Save configuration
@@ -296,12 +314,17 @@ EOF
             
             # Remove iptables rules
             echo -e "${blue}▣ Removing network rules...${plain}"
-            iptables -t nat -D PREROUTING -p udp --dport "$ports" -j REDIRECT --to-ports 22 2>/dev/null
+            iptables -t nat -F PREROUTING
             
             # Handle firewalld if enabled
             if [ "$FIREWALLD_ENABLED" = "enabled" ]; then
+                local ports=$(grep '^PORTS=' "$UDP_CONFIG" | cut -d= -f2)
                 echo -e "${blue}▣ Updating firewalld...${plain}"
-                firewall-cmd --remove-port="$ports/udp" --permanent
+                if [[ "$ports" == *":"* ]]; then
+                    firewall-cmd --remove-port="${ports/:/-}/udp" --permanent
+                else
+                    firewall-cmd --remove-port="$ports/udp" --permanent
+                fi
                 firewall-cmd --reload
             fi
             
@@ -716,7 +739,7 @@ show_usage() {
     echo -e "  --limit <user> <down_mbps> <up_mbps>"
     echo ""
     echo -e "${udp_color}UDP Configuration:${plain}"
-    echo -e "  --enable-udp [ports]"
+    echo -e "  --enable-udp [ports]  (e.g., 10000:20000 or 22)"
     echo -e "  --disable-udp"
     echo ""
     echo -e "${dnstt_color}DNSTT Configuration:${plain}"
@@ -729,7 +752,7 @@ show_usage() {
     echo ""
     echo -e "${yellow}Examples:${plain}"
     echo -e "  Create user: $0 --create user1 pass123 2 30 tcp \"Welcome\" 12345"
-    echo -e "  Enable UDP: $0 --enable-udp 10000-20000"
+    echo -e "  Enable UDP: $0 --enable-udp 10000:20000"
     echo -e "  Install DNSTT: $0 --install-dnstt example.com secretkey 443"
     echo ""
     log "Usage information displayed"
