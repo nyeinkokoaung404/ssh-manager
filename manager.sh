@@ -42,7 +42,7 @@ show_header() {
 show_footer() {
     echo ""
     echo -e "${yellow}------------------------------------${plain}"
-    echo -e "Developed by \033[1;35m 404${plain}"
+    echo -e "Developed by \033[1;35m 4 0 4 🇲🇲${plain}"
     echo -e "${yellow}------------------------------------${plain}"
     echo ""
     echo -e "${cyan}Contact: https://t.me/nkka404${plain}"
@@ -341,18 +341,18 @@ list_users() {
         
         if [[ "$expiry" == "never" ]]; then
             expiry="Never"
-            status="${green}Active${plain}"
+            status=$(echo -e "${green}Active${plain}")
         elif [[ $(date -d "$expiry" +%s) -lt $(date +%s) ]]; then
-            status="${red}Expired${plain}"
+            status=$(echo -e "${red}Expired${plain}")
         else
-            status="${green}Active${plain}"
+            status=$(echo -e "${green}Active${plain}")
         fi
         
         # Color protocol
         case "$protocol" in
-            tcp) protocol="${blue}$protocol${plain}" ;;
-            udp|both) protocol="${udp_color}$protocol${plain}" ;;
-            dnstt) protocol="${dnstt_color}$protocol${plain}" ;;
+            tcp) protocol=$(echo -e "${blue}$protocol${plain}") ;;
+            udp|both) protocol=$(echo -e "${udp_color}$protocol${plain}") ;;
+            dnstt) protocol=$(echo -e "${dnstt_color}$protocol${plain}") ;;
         esac
         
         printf "%-20s %-15s %-10s %-10s %-15s\n" "$user" "$expiry" "$limit" "$protocol" "$status"
