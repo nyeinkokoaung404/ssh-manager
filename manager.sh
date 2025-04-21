@@ -218,7 +218,7 @@ create_user() {
 configure_udp() {
     local start_time=$(date +%s)
     local action="$1"
-    local ports="${2:-1:65535}"  # Using colon as separator
+    local ports="${2:-1:65535}"  # Default port range with colon separator
     
     show_header
     
@@ -227,54 +227,55 @@ configure_udp() {
             log "Enabling UDP SSH on ports $ports"
             echo -e "${udp_color}➤ Enabling UDP SSH...${plain}"
             
-            # Install dependencies
-            echo -e "${blue}▣ Installing required packages...${plain}"
+            # Install required packages
+            echo -e "${blue}▣ Installing iptables-persistent...${plain}"
             apt-get update
-            apt-get install -y iptables-persistent
+            DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
             
             # Configure iptables
             echo -e "${blue}▣ Configuring network rules...${plain}"
             
             # Clear existing rules first
-            iptables -t nat -F PREROUTING 2>/dev/null
+            iptables -t nat -F PREROUTING
             
-            # Handle port specification
+            # Add UDP redirection rules
             if [[ "$ports" == *":"* ]]; then
-                # Port range - add rules individually for nftables
+                # Port range handling for Debian/Ubuntu
                 local start_port=${ports%:*}
                 local end_port=${ports#*:}
                 
+                # Add rule for each port in range
                 for (( port=start_port; port<=end_port; port++ )); do
-                    iptables -t nat -A PREROUTING -p udp --dport $port -j REDIRECT --to-ports 22 2>/dev/null
+                    iptables -t nat -A PREROUTING -p udp --dport $port -j REDIRECT --to-ports 22
                 done
             else
                 # Single port
-                iptables -t nat -A PREROUTING -p udp --dport $ports -j REDIRECT --to-ports 22 2>/dev/null
+                iptables -t nat -A PREROUTING -p udp --dport $ports -j REDIRECT --to-ports 22
             fi
             
-            # Save rules
-            mkdir -p /etc/iptables
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null
-            ip6tables-save > /etc/iptables/rules.v6 2>/dev/null
+            # Save rules persistently
+            echo -e "${blue}▣ Saving iptables rules...${plain}"
+            netfilter-persistent save
             
-            # Create simple systemd service
+            # Create systemd service
             cat > "$UDP_SERVICE" <<EOF
 [Unit]
-Description=UDP SSH Redirect
+Description=UDP SSH Redirect Service
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/iptables-restore < /etc/iptables/rules.v4
+ExecStart=/usr/sbin/netfilter-persistent start
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-            # Enable service
+            # Enable and start service
+            echo -e "${blue}▣ Enabling service...${plain}"
             systemctl daemon-reload
-            systemctl enable udp-ssh --now
+            systemctl enable --now udp-ssh
             
             echo -e "${green}✔ UDP SSH enabled on ports $ports${plain}"
             log "UDP enabled on ports $ports"
@@ -285,10 +286,10 @@ EOF
             echo -e "${udp_color}➤ Disabling UDP SSH...${plain}"
             
             # Remove iptables rules
-            iptables -t nat -F PREROUTING 2>/dev/null
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null
+            iptables -t nat -F PREROUTING
+            netfilter-persistent save
             
-            # Stop service
+            # Stop and disable service
             systemctl stop udp-ssh
             systemctl disable udp-ssh
             
