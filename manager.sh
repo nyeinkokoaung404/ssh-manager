@@ -214,14 +214,13 @@ create_user() {
     return 0
 }
 
-# Fixed UDP configuration that works with port ranges
+# Fixed and improved UDP configuration
 configure_udp() {
     local start_time=$(date +%s)
     local action="$1"
-    local ports="${2:-1:65535}"  # Using colon as separator
+    local ports="${2:-1:65535}"
     
     show_header
-    validate_input port "$ports" || return 1
     
     case "$action" in
         enable)
@@ -230,7 +229,7 @@ configure_udp() {
             
             # Install dependencies
             echo -e "${blue}▣ Installing required packages...${plain}"
-            if ! apt-get update || ! apt-get install -y iptables; then
+            if ! apt-get update || ! apt-get install -y iptables-persistent; then
                 log "Failed to install dependencies" "ERROR"
                 return 1
             fi
@@ -238,71 +237,51 @@ configure_udp() {
             # Configure iptables
             echo -e "${blue}▣ Configuring network rules...${plain}"
             
-            # Check if we're using nftables backend
-            local iptables_backend=$(iptables --version | grep -o nf_tables)
+            # Clear existing rules first
+            iptables -t nat -F PREROUTING
             
-            if [ "$iptables_backend" = "nf_tables" ]; then
-                # NFTables version - handle port ranges differently
-                if [[ "$ports" == *":"* ]]; then
-                    local start_port=${ports%:*}
-                    local end_port=${ports#*:}
+            # Handle port range or single port
+            if [[ "$ports" == *":"* ]]; then
+                local start_port=${ports%:*}
+                local end_port=${ports#*:}
+                
+                # Check if we're using nftables
+                if iptables --version | grep -q nf_tables; then
+                    # nftables version - need to add rules individually
                     for (( port=start_port; port<=end_port; port++ )); do
-                        iptables -t nat -A PREROUTING -p udp --dport "$port" -j REDIRECT --to-ports 22
+                        iptables -t nat -A PREROUTING -p udp --dport $port -j REDIRECT --to-ports 22
                     done
                 else
-                    # Single port
-                    iptables -t nat -A PREROUTING -p udp --dport "$ports" -j REDIRECT --to-ports 22
+                    # legacy iptables version
+                    iptables -t nat -A PREROUTING -p udp --dport $start_port:$end_port -j REDIRECT --to-ports 22
                 fi
             else
-                # Legacy iptables version
-                iptables -t nat -A PREROUTING -p udp --dport "$ports" -j REDIRECT --to-ports 22
+                # Single port
+                iptables -t nat -A PREROUTING -p udp --dport $ports -j REDIRECT --to-ports 22
             fi
             
-            # Handle firewalld if enabled
-            if [ "$FIREWALLD_ENABLED" = "enabled" ]; then
-                echo -e "${blue}▣ Configuring firewalld...${plain}"
-                if [[ "$ports" == *":"* ]]; then
-                    firewall-cmd --add-port="${ports/:/-}/udp" --permanent
-                else
-                    firewall-cmd --add-port="$ports/udp" --permanent
-                fi
-                firewall-cmd --reload
-            fi
-            
-            # Save configuration
-            echo "PORTS=$ports" > "$UDP_CONFIG"
-            echo "ENABLED=yes" >> "$UDP_CONFIG"
-            echo "CREATED=$(date +%Y-%m-%d_%H:%M:%S)" >> "$UDP_CONFIG"
-            
-            # Save iptables rules
+            # Save rules
             mkdir -p /etc/iptables
-            iptables-save > "$IPTABLES_RULES"
+            iptables-save > /etc/iptables/rules.v4
+            ip6tables-save > /etc/iptables/rules.v6
             
             # Create systemd service
             cat > "$UDP_SERVICE" <<EOF
 [Unit]
 Description=UDP SSH Redirect
 After=network.target
-Wants=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/iptables-restore < $IPTABLES_RULES
+ExecStart=/sbin/iptables-restore < /etc/iptables/rules.v4
 RemainAfterExit=yes
-ExecReload=/sbin/iptables-restore < $IPTABLES_RULES
-ExecStop=/sbin/iptables -F
-ExecStop=/sbin/iptables -t nat -F
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-            echo -e "${blue}▣ Enabling service...${plain}"
             systemctl daemon-reload
-            if ! systemctl enable --now udp-ssh; then
-                log "Failed to enable udp-ssh service" "ERROR"
-                return 1
-            fi
+            systemctl enable --now udp-ssh
             
             echo -e "${green}✔ UDP SSH enabled on ports $ports${plain}"
             log "UDP enabled on ports $ports"
@@ -313,38 +292,15 @@ EOF
             echo -e "${udp_color}➤ Disabling UDP SSH...${plain}"
             
             # Remove iptables rules
-            echo -e "${blue}▣ Removing network rules...${plain}"
             iptables -t nat -F PREROUTING
-            
-            # Handle firewalld if enabled
-            if [ "$FIREWALLD_ENABLED" = "enabled" ]; then
-                local ports=$(grep '^PORTS=' "$UDP_CONFIG" | cut -d= -f2)
-                echo -e "${blue}▣ Updating firewalld...${plain}"
-                if [[ "$ports" == *":"* ]]; then
-                    firewall-cmd --remove-port="${ports/:/-}/udp" --permanent
-                else
-                    firewall-cmd --remove-port="$ports/udp" --permanent
-                fi
-                firewall-cmd --reload
-            fi
-            
-            # Update configuration
-            echo "ENABLED=no" > "$UDP_CONFIG"
-            echo "DISABLED=$(date +%Y-%m-%d_%H:%M:%S)" >> "$UDP_CONFIG"
+            iptables-save > /etc/iptables/rules.v4
             
             # Stop service
-            echo -e "${blue}▣ Stopping service...${plain}"
             systemctl stop udp-ssh
             systemctl disable udp-ssh
             
             echo -e "${green}✔ UDP SSH disabled${plain}"
             log "UDP disabled"
-            ;;
-            
-        *)
-            log "Invalid UDP action: $action" "ERROR"
-            echo -e "${red}Error: Invalid UDP action${plain}"
-            return 1
             ;;
     esac
     
