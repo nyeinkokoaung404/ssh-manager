@@ -3,14 +3,6 @@
 # =============================================
 # CHANNEL 404 SSH MANAGER - ENHANCED VERSION
 # =============================================
-# Features:
-# - User management (create/delete/list)
-# - UDP SSH configuration (fixed port range support)
-# - DNSTT server setup
-# - Backup/restore functionality
-# - Bandwidth limiting
-# - Session monitoring
-# =============================================
 
 # Colors
 plain='\033[0m'
@@ -35,7 +27,7 @@ DNSTT_SERVICE="/etc/systemd/system/dnstt-server.service"
 LOG_FILE="/var/log/ssh_manager.log"
 IPTABLES_RULES="/etc/iptables.rules"
 FIREWALLD_ENABLED=$(systemctl is-enabled firewalld 2>/dev/null)
-VERSION="1.2.2"
+VERSION="1.3.0"
 
 # Initialize logging
 init_logging() {
@@ -61,13 +53,23 @@ check_root() {
         echo -e "${red}Error:${plain} Please run as root using sudo or switch to root user"
         exit 1
     fi
+    
+    # Check if running in a secure environment
+    if [[ "$(tty)" =~ "pts" ]]; then
+        log "Warning: Running over SSH connection" "WARNING"
+        read -p "Are you sure you want to continue over SSH? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
 }
 
 # Header display with version info
 show_header() {
     clear
     echo -e "${green}==============================================="
-    echo -e "   🌺 CHANNEL 404 SSH MANAGER v$VERSION 🌺  "
+    echo -e "   💥 404 SSH MANAGER v$VERSION ⚡  "
     echo -e "===============================================${plain}"
     echo -e "${blue}▣ Server: ${green}$(hostname)${plain}"
     echo -e "${blue}▣ IP: ${green}$(curl -s ifconfig.me)${plain}"
@@ -99,6 +101,13 @@ validate_input() {
     
     case "$type" in
         username)
+            # Prevent reserved usernames
+            local reserved_users=(root admin sshd)
+            if [[ " ${reserved_users[*]} " =~ " $value " ]]; then
+                log "Attempt to create reserved username: $value" "ERROR"
+                echo -e "${red}Error:${plain} Username '$value' is reserved"
+                return 1
+            fi
             if ! [[ "$value" =~ ^[a-z_][a-z0-9_-]{3,15}$ ]]; then
                 log "Invalid username: $value" "ERROR"
                 echo -e "${red}Error:${plain} Username must be 4-16 chars (a-z, 0-9, _-) starting with letter"
@@ -106,9 +115,10 @@ validate_input() {
             fi
             ;;
         password)
-            if [[ ${#value} -lt 4 ]]; then
-                log "Password too short: $value" "ERROR"
-                echo -e "${red}Error:${plain} Password must be at least 4 characters"
+            # Require stronger passwords
+            if [[ ${#value} -lt 8 ]]; then
+                log "Password too weak: $value" "ERROR"
+                echo -e "${red}Error:${plain} Password must be at least 8 characters"
                 return 1
             fi
             ;;
@@ -123,6 +133,13 @@ validate_input() {
             if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ]; then
                 log "Invalid days value: $value" "ERROR"
                 echo -e "${red}Error:${plain} Days must be a positive number"
+                return 1
+            fi
+            ;;
+        bandwidth)
+            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ]; then
+                log "Invalid bandwidth value: $value" "ERROR"
+                echo -e "${red}Error:${plain} Bandwidth must be a positive number (Mbps)"
                 return 1
             fi
             ;;
@@ -415,6 +432,18 @@ delete_user() {
     
     show_header
     
+    # Prevent deletion of root/admin
+    if [[ "$username" == "root" || "$username" == "admin" ]]; then
+        echo -e "${red}Error: Cannot delete protected user $username${plain}"
+        return 1
+    fi
+    
+    # Check if user exists in system
+    if ! id "$username" &>/dev/null; then
+        echo -e "${yellow}User $username does not exist${plain}"
+        return 1
+    fi
+    
     if grep -q "^$username " "$USER_DB"; then
         echo -e "${yellow}➤ Deleting user $username...${plain}"
         
@@ -603,7 +632,7 @@ restore_users() {
     return 0
 }
 
-# Extend user expiry
+# Extend single user expiry
 extend_user() {
     local start_time=$(date +%s)
     local username="$1"
@@ -641,6 +670,59 @@ extend_user() {
     return 0
 }
 
+# Extend all users expiry
+extend_all_users() {
+    local start_time=$(date +%s)
+    local days="$1"
+    
+    show_header
+    
+    validate_input days "$days" || return 1
+    
+    if [ ! -f "$USER_DB" ] || [ ! -s "$USER_DB" ]; then
+        echo -e "${yellow}No users found to extend${plain}"
+        return 0
+    fi
+    
+    echo -e "${blue}➤ Extending all users by $days days...${plain}"
+    
+    local success_count=0
+    local fail_count=0
+    
+    while read -r line; do
+        local username=$(echo "$line" | awk '{print $1}')
+        
+        # Skip system users
+        if [[ "$username" == "root" || "$username" == "admin" ]]; then
+            continue
+        fi
+        
+        local current_expiry=$(chage -l "$username" | grep "Account expires" | cut -d: -f2 | sed 's/^ *//')
+        if [[ "$current_expiry" == "never" ]]; then
+            continue
+        fi
+        
+        local new_expiry=$(date -d "$current_expiry + $days days" +%Y-%m-%d)
+        
+        if usermod -e "$new_expiry" "$username"; then
+            echo -e "${green}✔ Extended $username to $(date -d "$new_expiry" +%d/%m/%Y)${plain}"
+            ((success_count++))
+        else
+            echo -e "${red}✖ Failed to extend $username${plain}"
+            ((fail_count++))
+        fi
+    done < "$USER_DB"
+    
+    echo -e "${blue}▣ Successfully extended: ${green}$success_count users${plain}"
+    if [ $fail_count -gt 0 ]; then
+        echo -e "${red}▣ Failed to extend: $fail_count users${plain}"
+    fi
+    
+    log "Extended all users by $days days (Success: $success_count, Failed: $fail_count)"
+    show_footer "$start_time"
+    return 0
+}
+
 # Limit user bandwidth
 limit_bandwidth() {
     local start_time=$(date +%s)
@@ -664,14 +746,74 @@ limit_bandwidth() {
         fi
     fi
     
-    # TODO: Implement actual bandwidth limiting
-    # This is a placeholder for actual implementation
-    echo -e "${yellow}⚠ Bandwidth limiting not fully implemented yet${plain}"
-    echo -e "${blue}▣ User: ${green}$username${plain}"
-    echo -e "${blue}▣ Download limit: ${green}$down_mbps Mbps${plain}"
-    echo -e "${blue}▣ Upload limit: ${green}$up_mbps Mbps${plain}"
+    # Check if user already has limits
+    if [[ -f "/etc/wondershaper/$username" ]]; then
+        echo -e "${yellow}⚠ User $username already has bandwidth limits${plain}"
+        read -p "Overwrite existing limits? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            return 0
+        fi
+    fi
     
-    log "Set bandwidth limits for $username (Down: $down_mbps Mbps, Up: $up_mbps Mbps)"
+    # Convert Mbps to Kbps (wondershaper uses Kbps)
+    local down_kbps=$((down_mbps * 1000))
+    local up_kbps=$((up_mbps * 1000))
+    
+    # Get user's network interface
+    local interface=$(ip route | awk '/default/ {print $5}')
+    
+    # Apply limits
+    if wondershaper "$interface" "$down_kbps" "$up_kbps"; then
+        # Save user-specific limits
+        mkdir -p "/etc/wondershaper"
+        echo "$username $down_kbps $up_kbps" > "/etc/wondershaper/$username"
+        echo -e "${green}✔ Bandwidth limits applied successfully${plain}"
+        echo -e "${blue}▣ User: ${green}$username${plain}"
+        echo -e "${blue}▣ Download limit: ${green}$down_mbps Mbps${plain}"
+        echo -e "${blue}▣ Upload limit: ${green}$up_mbps Mbps${plain}"
+        log "Set bandwidth for $username (Down: ${down_mbps}Mbps, Up: ${up_mbps}Mbps)"
+    else
+        echo -e "${red}Error: Failed to apply bandwidth limits${plain}"
+        return 1
+    fi
+    
+    show_footer "$start_time"
+    return 0
+}
+
+# Remove bandwidth limits for user
+unlimit_bandwidth() {
+    local start_time=$(date +%s)
+    local username="$1"
+    
+    show_header
+    
+    if ! grep -q "^$username " "$USER_DB"; then
+        echo -e "${red}Error: User $username not found${plain}"
+        return 1
+    fi
+    
+    # Check if wondershaper is installed
+    if ! command -v wondershaper &> /dev/null; then
+        echo -e "${yellow}⚠ Wondershaper not installed - no limits to remove${plain}"
+        return 0
+    fi
+    
+    # Get user's network interface
+    local interface=$(ip route | awk '/default/ {print $5}')
+    
+    # Clear limits
+    if wondershaper clear "$interface"; then
+        # Remove user limit file
+        rm -f "/etc/wondershaper/$username"
+        echo -e "${green}✔ Bandwidth limits removed for $username${plain}"
+        log "Removed bandwidth limits for $username"
+    else
+        echo -e "${red}Error: Failed to remove bandwidth limits${plain}"
+        return 1
+    fi
+    
     show_footer "$start_time"
     return 0
 }
@@ -686,7 +828,9 @@ show_usage() {
     echo -e "  --delete <user>"
     echo -e "  --list"
     echo -e "  --extend <user> <days>"
+    echo -e "  --extend-all <days>"
     echo -e "  --limit <user> <down_mbps> <up_mbps>"
+    echo -e "  --unlimit <user>"
     echo ""
     echo -e "${udp_color}UDP Configuration:${plain}"
     echo -e "  --enable-udp [ports]  (e.g., 10000:20000 or 22)"
@@ -702,7 +846,8 @@ show_usage() {
     echo ""
     echo -e "${yellow}Examples:${plain}"
     echo -e "  Create user: $0 --create user1 pass123 2 30 tcp \"Welcome\" 12345"
-    echo -e "  Enable UDP: $0 --enable-udp 10000:20000"
+    echo -e "  Extend all: $0 --extend-all 30"
+    echo -e "  Remove limits: $0 --unlimit user1"
     echo -e "  Install DNSTT: $0 --install-dnstt example.com secretkey 443"
     echo ""
     log "Usage information displayed"
@@ -743,8 +888,14 @@ case "$1" in
     --extend)
         extend_user "$2" "$3"
         ;;
+    --extend-all)
+        extend_all_users "$2"
+        ;;
     --limit)
         limit_bandwidth "$2" "$3" "$4"
+        ;;
+    --unlimit)
+        unlimit_bandwidth "$2"
         ;;
     *)
         show_usage
